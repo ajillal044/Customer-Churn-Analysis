@@ -1,0 +1,431 @@
+---
+title: "Understanding Customer Churn \ Insights from Ted & Poppy Pet shop"
+authors: "Ajil  Aiswarya Ruizhu Shawn"
+format:format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+# Load necessary libraries
+library(tidyverse)    # For data manipulation and visualization
+library(caret)        # For modeling and cross-validation
+library(ROCR)         # For ROC curve
+library(randomForest) # For Random Forest Model
+library(ggplot2)      # For plotting
+library(corrplot)     # For correlation heatmap
+library(caTools)      # For splitting data
+library(class)
+library(rpart)      # Decision Tree
+library(xgboost)    # XGBoost
+library(lightgbm)   # LightGBM
+library(MLmetrics)  # Additional metrics
+library(gridExtra)
+```
+
+## Load the data
+
+```{r}
+data <- read.csv("C:/Users/asus/OneDrive - The University of Auckland/BUSINFO 704/assignments/group project/tedpoppydata_final.csv")
+```
+
+## Data Exploration and Cleaning
+```{r}
+
+
+# Remove "$" from avg_purchase_value and convert to numeric
+data$avg_purchase_value <- as.numeric(gsub("\\$", "", data$avg_purchase_value))
+
+# Remove " days" from days_since_last_web_purchase and convert to numeric
+data$days_since_last_web_purchase <- as.numeric(gsub(" days", "", data$days_since_last_web_purchase))
+
+# Drop user_ID column
+data$user_ID <- NULL
+
+# Check for missing values
+summary(data)
+glimpse(data)
+
+sum(is.na(data$app_visits))
+
+# Handling missing values (example: imputing with median for numeric columns)
+data$age[is.na(data$age)] <- median(data$age, na.rm = TRUE)
+data$satisfaction_survey[is.na(data$satisfaction_survey)] <- 'Unknown'
+data$avg_purchase_value[is.na(data$avg_purchase_value)] <- median(data$avg_purchase_value, na.rm = TRUE)
+data$days_since_last_web_purchase[is.na(data$days_since_last_web_purchase)] <- median(data$days_since_last_web_purchase, na.rm = TRUE)
+
+# Convert categorical variables to factors
+data$gender <- as.factor(data$gender)
+data$support_ticket <- as.factor(data$support_ticket)
+data$satisfaction_survey <- as.factor(data$satisfaction_survey)
+data$subscription <- as.factor(data$subscription)
+data$location <- as.factor(data$location)
+data$payment_type <- as.factor(data$payment_type)
+data$subscription_payment_problem_last6Months <- as.factor(data$subscription_payment_problem_last6Months)
+data$retained_binary <- as.factor(data$retained_binary)
+
+```
+## FEATURE ENGINEERING
+```{r}
+# Create new feature for customer activity
+data$active_engagement <- data$community_posts_made + data$community_topics_made + 
+  data$community_follows + data$app_visits + data$website_visits
+```
+## Undersample Majority Class (retained_binary = 1) before Split
+```{r}
+
+
+# Separate the data into the majority and minority classes
+majority_class <- subset(data, retained_binary == 1)
+minority_class <- subset(data, retained_binary == 0)
+
+# Undersample the majority class by selecting a random subset equal to the size of the minority class
+set.seed(123)  # For reproducibility
+undersample_majority <- majority_class[sample(nrow(majority_class), nrow(minority_class)), ]
+
+# Combine the undersampled majority class with the minority class
+balanced_data <- rbind(undersample_majority, minority_class)
+
+# Check the distribution of the balanced dataset
+table(balanced_data$retained_binary)
+```
+
+## TRAIN - TEST DATA SPLITTING (70/30)
+```{r}
+# Split the balanced dataset into training and testing sets
+split <- sample.split(balanced_data$retained_binary, SplitRatio = 0.7)
+
+# Create training and testing datasets
+train_data <- subset(balanced_data, split == TRUE)
+test_data <- subset(balanced_data, split == FALSE)
+
+# Check the size of the datasets
+dim(train_data)
+dim(test_data)
+```
+
+## Logistic Regression
+```{r}
+
+# Train a logistic regression model
+logit_model <- glm(retained_binary ~ age + gender + satisfaction_survey+avg_purchase_value+ days_since_last_web_purchase +active_engagement + subscription + active_engagement + subscription + payment_type + subscription_payment_problem_last6Months, 
+                   data = train_data, family = "binomial")
+
+# Summary of the model
+summary(logit_model)
+
+# Predict and evaluate the model
+
+logit_pred <- predict(logit_model, newdata = test_data, type = "response")
+logit_pred_class <- ifelse(logit_pred > 0.5, 1, 0)
+
+# Performance Metrics for Logistic Regression
+conf_matrix <- confusionMatrix(factor(logit_pred_class), test_data$retained_binary)
+print(conf_matrix)
+
+# ROC Curve
+roc_pred <- prediction(logit_pred, test_data$retained_binary)
+roc_perf <- performance(roc_pred, "tpr", "fpr")
+plot(roc_perf, main = "ROC Curve for Logistic Regression")
+
+# Calculate AUC
+auc_value <- performance(roc_pred, "auc")@y.values[[1]]
+print(paste("AUC Value:", auc_value))
+
+```
+
+## Random Forest Model
+```{r}
+
+
+# Train a random forest model
+rf_model <- randomForest(retained_binary ~ age + gender + satisfaction_survey + active_engagement + subscription+ 
+                           avg_purchase_value + days_since_last_web_purchase + payment_type + subscription_payment_problem_last6Months, 
+                         data = train_data)
+
+# Summary of the model
+print(rf_model)
+
+# Predict and evaluate the model
+rf_pred <- predict(rf_model, newdata = test_data)
+conf_matrix_rf <- confusionMatrix(rf_pred, test_data$retained_binary)
+print(conf_matrix_rf)
+
+# ROC Curve
+rf_pred_prob <- predict(rf_model, newdata = test_data, type = "prob")[,2]  # Get probabilities for class 1
+rf_roc <- prediction(rf_pred_prob, test_data$retained_binary)
+rfroc_perf <- performance(rf_roc, "tpr", "fpr")
+plot(rfroc_perf, main = "ROC Curve for Random Forest")
+# Compute AUC
+rf_auc <- performance(rf_roc, "auc")@y.values[[1]]
+print(paste("AUC Value for Random Forest:", rf_auc))
+
+# Feature Importance
+importance(rf_model)
+```
+## DECISION TREE
+
+```{r}
+
+# Train Decision Tree Model
+dt_model <- rpart(retained_binary ~ age + gender + satisfaction_survey +
+                    avg_purchase_value + days_since_last_web_purchase + active_engagement + subscription + payment_type + subscription_payment_problem_last6Months, 
+                  data = train_data, method = "class")
+
+# Predict
+dt_pred_prob <- predict(dt_model, newdata = test_data, type = "prob")[,2]  # Probabilities for class 1
+dt_pred_class <- predict(dt_model, newdata = test_data, type = "class")
+
+# Confusion Matrix
+conf_matrix_dt <- confusionMatrix(dt_pred_class, test_data$retained_binary)
+print(conf_matrix_dt)
+
+# ROC & AUC for Decision Tree
+dt_roc <- prediction(dt_pred_prob, test_data$retained_binary)
+dt_perf <- performance(dt_roc, "tpr", "fpr")
+dt_auc <- performance(dt_roc, "auc")@y.values[[1]]
+print(paste("AUC Value for Decision Tree:", dt_auc))
+
+```
+## XGBOOST
+
+```{r,echo=FALSE}
+
+
+# Convert data to matrix format for XGBoost
+train_matrix <- model.matrix(~ age + gender + satisfaction_survey +avg_purchase_value + days_since_last_web_purchase + active_engagement + subscription + payment_type + subscription_payment_problem_last6Months - 1, 
+                             data = train_data)
+test_matrix <- model.matrix(~ age + gender + satisfaction_survey +avg_purchase_value + days_since_last_web_purchase + active_engagement + subscription + payment_type + subscription_payment_problem_last6Months - 1, 
+                            data = test_data)
+
+# Convert target variable to numeric for XGBoost
+train_labels <- as.numeric(as.character(train_data$retained_binary))
+test_labels <- as.numeric(as.character(test_data$retained_binary))
+
+# Train XGBoost Model
+xgb_model <- xgboost(data = train_matrix, label = train_labels, nrounds = 100, objective = "binary:logistic")
+
+# Predict
+xgb_pred_prob <- predict(xgb_model, newdata = test_matrix)
+xgb_pred_class <- ifelse(xgb_pred_prob > 0.5, 1, 0)
+
+# Confusion Matrix
+conf_matrix_xgb <- confusionMatrix(factor(xgb_pred_class), factor(test_labels))
+print(conf_matrix_xgb)
+
+# ROC & AUC for XGBoost
+xgb_roc <- prediction(xgb_pred_prob, test_labels)
+xgb_perf <- performance(xgb_roc, "tpr", "fpr")
+xgb_auc <- performance(xgb_roc, "auc")@y.values[[1]]
+print(paste("AUC Value for XGBoost:", xgb_auc))
+```
+
+#LIGHTGBM
+
+```{r}
+# Convert data to LightGBM format
+dtrain <- lgb.Dataset(data = train_matrix, label = train_labels)
+dtest <- lgb.Dataset(data = test_matrix, label = test_labels)
+
+# Train LightGBM Model
+lgb_model <- lgb.train(params = list(objective = "binary"), data = dtrain, nrounds = 100)
+
+# Predict
+lgb_pred_prob <- predict(lgb_model, test_matrix)
+lgb_pred_class <- ifelse(lgb_pred_prob > 0.5, 1, 0)
+
+# Confusion Matrix
+conf_matrix_lgb <- confusionMatrix(factor(lgb_pred_class), factor(test_labels))
+print(conf_matrix_lgb)
+
+# ROC & AUC for LightGBM
+lgb_roc <- prediction(lgb_pred_prob, test_labels)
+lgb_perf <- performance(lgb_roc, "tpr", "fpr")
+lgb_auc <- performance(lgb_roc, "auc")@y.values[[1]]
+print(paste("AUC Value for LightGBM:", lgb_auc))
+
+```
+## K-Nearest Neighbors Model
+
+```{r}
+
+
+# Train KNN Model
+knn_model <- knn(train = train_matrix, test = test_matrix, cl = train_data$retained_binary, k = 5)
+
+# Confusion Matrix
+conf_matrix_knn <- confusionMatrix(factor(knn_model), factor(test_data$retained_binary))
+print(conf_matrix_knn)
+
+# ROC & AUC for KNN
+knn_pred_prob <- as.numeric(knn_model)  # Convert factor to numeric for ROC
+knn_roc <- prediction(knn_pred_prob, test_data$retained_binary)
+knn_perf <- performance(knn_roc, "tpr", "fpr")
+knn_auc <- performance(knn_roc, "auc")@y.values[[1]]
+print(paste("AUC Value for KNN:", knn_auc))
+```
+##ROC curve Comparison
+```{r}
+
+
+
+
+# Calculate AUC values for each model
+auc_values <- c(
+  Logistic = auc_value,
+  RandomForest = rf_auc,
+  DecisionTree = dt_auc,
+  XGBoost = xgb_auc,
+  LightGBM = lgb_auc,
+  KNN = knn_auc
+)
+
+# Create a list to store ROC performance objects
+roc_list <- list(
+  Logistic = roc_perf,
+  RandomForest = rfroc_perf,
+  DecisionTree = dt_perf,
+  XGBoost = xgb_perf,
+  LightGBM = lgb_perf,
+  KNN = knn_perf
+)
+
+# Extract TPR and FPR from the performance objects
+roc_data <- do.call(rbind, lapply(names(roc_list), function(model) {
+  perf <- roc_list[[model]]
+  data.frame(
+    Model = paste(model, "(AUC =", round(auc_values[model], 3), ")"),
+    FPR = unlist(perf@x.values),
+    TPR = unlist(perf@y.values)
+  )
+}))
+
+# Plot ROC curves for all models with AUC values in the legend
+ggplot(roc_data, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(size = 1) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = "ROC Curves for Various Models",
+       x = "False Positive Rate (FPR)",
+       y = "True Positive Rate (TPR)",
+       color = "Model") +
+  theme_minimal()
+
+```
+
+##FEATURE IMPORTANCE O F LightGBM Model
+```{r}
+# Finding Feature Importance for LightGBM
+importance_gain <- lgb.importance(lgb_model, percentage = TRUE)
+print(importance_gain)
+lgb.plot.importance(importance_gain, top_n = 20)
+# Select the top 4 features
+top_5_importance <- importance_gain[1:5, ]
+
+# Create a ggplot bar plot for the top 4 features with a gradient from light blue to dark blue
+ggplot(top_5_importance, aes(x = reorder(Feature, Gain), y = Gain, fill = Gain)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "#add8e6", high = "#2d2d46") +
+  coord_flip() +
+  labs(title = "Top 5 Feature Importances for LightGBM",
+       x = "Feature",
+       y = "Importance (Gain)") +
+  theme_minimal()
+```
+
+##Descriptive Analysis
+```{r}
+# Churn vs days since last web purchase
+ggplot(balanced_data, aes(x = retained_binary, y = days_since_last_web_purchase, fill = retained_binary)) + 
+  geom_boxplot() + 
+  labs(title = "Distribution of days since last web purchase by Retention Status")
+```
+
+```{r}
+# churn vs satisfaction survey
+
+data_last <- subset(data,retained_binary == 0)
+data_last_2 <- subset(data_last,satisfaction_survey != "NoResponse")
+# Investigate churn rate by various features
+ggplot(data_last_2, aes(x = satisfaction_survey)) + 
+  geom_bar(fill = "#f7cb89") + 
+  labs(title = "Churn Rate by Satisfaction Survey Response",
+       x = "Satisfaction Survey Response",
+       y = "Count") +
+  theme_minimal() +
+  theme(panel.grid = element_blank()) # Remove grid lines
+```
+
+```{r}
+# churn vs Average purchase value
+ggplot(balanced_data, aes(x = retained_binary, y = avg_purchase_value, fill = retained_binary)) + 
+  geom_boxplot() + 
+  labs(title = "Distribution of Average Purchase Value by Retention Status")
+```
+
+```{r}
+
+# Payment problem vs Churn
+# Calculate proportions
+true_counts <- data %>%
+  filter(subscription_payment_problem_last6Months == TRUE) %>%
+  count(retained_binary) %>%
+  mutate(prop = n / sum(n))
+
+false_counts <- data %>%
+  filter(subscription_payment_problem_last6Months == FALSE) %>%
+  count(retained_binary) %>%
+  mutate(prop = n / sum(n))
+
+# Function to create doughnut chart with custom colors
+create_doughnut_chart <- function(counts, title) {
+  ggplot(counts, aes(x = "", y = prop, fill = factor(retained_binary))) +
+    geom_bar(width = 1, stat = "identity") +
+    coord_polar(theta = "y") +
+    theme_void() +
+    labs(title = title, fill = "Retained (TRUE/FALSE)") +
+    geom_text(aes(label = scales::percent(prop)), position = position_stack(vjust = 0.5)) +
+    theme(legend.position = "bottom") +
+    scale_fill_manual(values = c("0" = "#f7cb89", "1" = "lightgray")) +
+    annotate("text", x = 0, y = 0, label = "", size = 10, color = "white")
+}
+
+# Plot doughnut charts
+plot1 <- create_doughnut_chart(true_counts, "Proportion of Retained vs. Non-Retained (True)")
+plot2 <- create_doughnut_chart(false_counts, "Proportion of Retained vs. Non-Retained (False)")
+# Display plots side by side
+grid.arrange(plot1, plot2, ncol = 2)
+```
+
+```{r}
+#Age vs Churn Rate
+
+# Remove NA values in age_group
+# Create age groups
+ balanced_data <- balanced_data %>%
+     mutate(age_group = cut(age, 
+                            breaks = c(18, 25, 35, 45, 55, 65, Inf), 
+                            labels = c("18-25", "26-35", "36-45", "46-55", "56-65", "65+"),
+                            include.lowest = TRUE))
+balanced_data1 <- balanced_data %>% filter(!is.na(age_group))
+
+# Plot churn rate by age group with percentage labels
+ggplot(balanced_data1, aes(x = age_group, fill = as.factor(retained_binary))) +
+  geom_bar(position = "fill") +  # Stacked proportionally
+  geom_text(stat = "count", 
+            aes(label = scales::percent(..count../tapply(..count.., ..x.., sum)[..x..], accuracy = 1)), 
+            position = position_fill(vjust = 0.5), size = 4) +  # Percentage labels
+  labs(title = "Churn Rate by Age Group",
+       x = "Age Group",
+       y = "Proportion of Customers",
+       fill = "Retention Status") +
+  scale_fill_manual(values = c("0" = "#f7cb89", "1" = "lightgray")) +  # Custom colors
+  theme_minimal()
+```
+
